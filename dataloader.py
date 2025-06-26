@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 import matplotlib.pyplot as plt
 from polylines import load_polylines, render_polylines
-
+import glob
 
 class PolylineDataset(Dataset):
 
@@ -16,21 +16,23 @@ class PolylineDataset(Dataset):
         folder_path: str,
         size: int = 256,
     ):
-        self.folder_path = Path(folder_path)
+        self.folder_path = folder_path.strip()
         self.size = size
         
         # Find all .npy files recursively
         self.file_paths = self._find_npy_files()
+        # sort by file name
+        self.file_paths.sort()
+        self.file_paths = self.file_paths[:1025]
         
         if len(self.file_paths) == 0:
+            import pdb; pdb.set_trace()
             raise ValueError(f"No .npy files found in {folder_path}")
         
         print(f"Found {len(self.file_paths)} .npy files in {folder_path}")
     
     def _find_npy_files(self) -> List[Path]:
-        """Find all .npy files recursively in the folder."""
-        return list(self.folder_path.rglob("*.npy"))
-
+        return glob.glob(os.path.join(self.folder_path, "**/*.npy"), recursive=True)
     
     def _apply_rotation_augmentation(self, img: np.ndarray) -> np.ndarray:        
         # Random rotation: 0°, 90°, 180°, or 270°
@@ -48,23 +50,30 @@ class PolylineDataset(Dataset):
         return img
     
     def __len__(self) -> int:
-        return len(self.file_paths)
+        return len(self.file_paths) * 16
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-
+        N = len(self.file_paths)
+        idx = idx % N
         file_path = self.file_paths[idx]
         
-        # Load polylines from file
-        polylines = load_polylines(
-            str(file_path),
-            normalizing_scale=self.size,
-            should_close=True
-        )
-        img = render_polylines(polylines, self.size)
-        assert img.dtype != np.float32, f"Image is not uint8, got {img.dtype}. range: {img.min()} - {img.max()}"
+        try:
+            # Load polylines from file
+            polylines = load_polylines(
+                str(file_path),
+                normalizing_scale=self.size,
+                should_close=True
+            )
+            
+            img = render_polylines(polylines, self.size)
+            assert img.dtype != np.float32, f"Image is not uint8, got {img.dtype}. range: {img.min()} - {img.max()}"
+        except Exception as e:
+            print(f"Error loading file {file_path}: {e}")
+            img = render_polylines([], self.size)  
+             
         img = img.astype(np.float32) / 255.0
         img = self._apply_rotation_augmentation(img).transpose(2, 0, 1)
-        img_tensor = torch.from_numpy(img.copy())  # Shape: (3, size, size)
+        img_tensor = torch.from_numpy(img.copy())  # Shape: (3, size, size)     
         return img_tensor, img_tensor.clone()
 
 def create_polyline_dataloaders(
@@ -150,3 +159,4 @@ def test_polyline_dataset():
 
 if __name__ == "__main__":
     test_polyline_dataset() 
+    

@@ -10,35 +10,19 @@ from model import Flux, FluxParams
 from image_encoder import ImageEncoder
 from autoencoder import HuggingFaceAutoEncoder
 # from default_config import configs
-from utils import get_ids, logit_normal_sample, euler_sampler
-
-
-params=FluxParams(
-    in_channels=4,
-    out_channels=4,
-    vec_in_dim=1,
-    context_in_dim=512,
-    hidden_size=1536,
-    mlp_ratio=4.0,
-    num_heads=12,
-    depth=2,
-    depth_single_blocks=4,
-    axes_dim=[16, 56, 56],
-    theta=10_000,
-    qkv_bias=True,
-    guidance_embed=False,
-)
+from utils import get_ids, logit_normal_sample, euler_sampler, euler_sampler_test
 
 
 class FluxLightning(L.LightningModule):
     def __init__(
         self,
-        learning_rate=1e-3,
-        max_lr=1e-3,
-        warmup_pct=0.3,
-        weight_decay=0.01,
-        beta1=0.9,
-        beta2=0.999
+        params:FluxParams,
+        learning_rate,
+        max_lr,
+        warmup_pct,
+        weight_decay,
+        beta1,
+        beta2
     ):
         super().__init__()
         self.learning_rate = learning_rate
@@ -61,7 +45,7 @@ class FluxLightning(L.LightningModule):
             num_res_blocks=2,
             out_channels=512
         )
-        self.flux.vector_in = nn.Identity()
+        self.flux.vector_in = None
         
         # Initialize the autoencoder
         self.autoencoder = HuggingFaceAutoEncoder()
@@ -69,9 +53,27 @@ class FluxLightning(L.LightningModule):
         pdf, x = logit_normal_sample(mu=1, sigma=1, num_samples=self.steps*10)
         self.register_buffer('pdf', pdf)
         self.register_buffer('x', x)
+        # self.register_buffer('u_pdf', u_pdf)
+        # self.register_buffer('u_x', u_x)
+
+        self.print_hyperparameters()
         
-    def sample_timesteps(self, batch_size):
-        return self.x[torch.multinomial(self.pdf, batch_size, replacement=False)]
+    def print_hyperparameters(self):
+        print("\n===== FluxLightning Hyperparameters =====")
+        print(f"learning_rate: {self.learning_rate}")
+        print(f"max_lr:        {self.max_lr}")
+        print(f"warmup_pct:    {self.warmup_pct}")
+        print(f"weight_decay:  {self.weight_decay}")
+        print(f"beta1:         {self.beta1}")
+        print(f"beta2:         {self.beta2}")
+        print(f"steps:         {self.steps}")
+        print("========================================\n")
+        
+    def sample_timesteps(self, batch_size, eps=1e-4):
+        t = torch.distributions.Beta(concentration1=2.5, concentration0=2.0).sample((batch_size,)).to(self.device)
+        t = t.clamp(eps, 1.0 - eps)                        # (0, 1) guard-band
+        assert torch.all((t >= 0.0) & (t <= 1.0)), "t out of [0,1] range"
+        return t
         
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -80,33 +82,25 @@ class FluxLightning(L.LightningModule):
             weight_decay=self.weight_decay,
             betas=(self.beta1, self.beta2)
         )
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=self.max_lr,
-            total_steps=self.trainer.estimated_stepping_batches,
-            pct_start=self.warmup_pct,
-        )
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-            },
-        }
+        return optimizer
+        # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        #     optimizer,
+        #     max_lr=self.max_lr,
+        #     total_steps=self.trainer.estimated_stepping_batches,
+        #     pct_start=self.warmup_pct,
+        # )
+        # return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
         
     def forward(self, x: Tensor, x_ids: Tensor, y: Tensor, y_ids: Tensor, timesteps: Tensor) -> Tensor:
-        vec = torch.zeros(x.shape[0], self.params.hidden_size, device=self.device)
-        return self.flux(img=x, img_ids=x_ids, txt=y, txt_ids=y_ids, timesteps=timesteps, y=vec)
+        # vec = torch.zeros(x.shape[0], self.params.hidden_size, device=self.device)
+        return self.flux(img=x, img_ids=x_ids, txt=y, txt_ids=y_ids, timesteps=timesteps, y=None)
         
     def prepare(self, batch):
         cond, target = batch
         b, c, h, w = target.shape
         _b, _c, _h, _w = cond.shape
         assert _c == 3, f"Condition must have 3 channels, got {_c}"
-        
-        # Assert that target image is 256x256
         assert h == w == 256, f"Target image must be 256x256, got {h}x{w}"
-
         y = self.cond_encoder(cond)        
         y = y.view(b, 512, -1).permute(0, 2, 1).contiguous()
         with torch.no_grad():
@@ -142,7 +136,7 @@ class FluxLightning(L.LightningModule):
         v = z1 - z0
         mse = F.mse_loss(v_theta, v)
         
-        self.log('train/batch_loss', mse, sync_dist=True, prog_bar=True)
+        self.log('train_loss', mse, sync_dist=True, prog_bar=True)
         return mse
         
     def validation_step(self, batch, batch_idx):
@@ -158,7 +152,7 @@ class FluxLightning(L.LightningModule):
             
             v = z1 - z0
             loss = F.mse_loss(v_theta, v)
-            self.log('val/batch_loss', loss, sync_dist=True, prog_bar=True)
+            self.log('val_loss', loss, sync_dist=True, prog_bar=True)
             
             ts_losses = (v_theta - v).pow(2).mean(dim=(1, 2))
             return {
@@ -182,10 +176,47 @@ class FluxLightning(L.LightningModule):
         z1 = torch.randn((b, 32*32, 4), device=self.device, dtype=self.dtype)
         zt = euler_sampler(self, y, z1, x_ids, y_ids, steps)
 
-        zt = zt.view(b, 4, 32, 32).contiguous()
+        zt = zt.permute(0, 2, 1).view(b, 4, 32, 32).contiguous()
         zt = self.autoencoder.decode(zt)
 
         decoded_img = zt.clamp(0, 1)
+        return decoded_img
+
+    @torch.no_grad()
+    def sample_test(self, cond: Tensor, steps: int=24) -> Tensor:
+        b, c, h, w = cond.shape
+        assert h == w == 256, f"Condition must be 256x256, got {h}x{w}"
+        assert c == 3, f"Condition must have 3 channels, got {c}"
+        
+        y = self.cond_encoder(cond.to(self.device))
+        y = y.view(b, 512, -1).permute(0, 2, 1).contiguous()
+        x_ids, y_ids = get_ids(32, 32, y.shape[1])
+        x_ids = repeat(x_ids, 'a l c -> (a b) l c', b=b).to(self.device)
+        y_ids = repeat(y_ids, 'a l c -> (a b) l c', b=b).to(self.device)
+
+        z0 = self.autoencoder.encode(cond)
+        z0 = z0.view(b, 4, -1).permute(0, 2, 1).contiguous()
+
+        z1 = torch.randn((b, 32*32, 4), device=self.device, dtype=self.dtype)
+        zt = euler_sampler_test(self, y, z1, z0, x_ids, y_ids, steps)
+
+        print(f'Final Loss: {F.mse_loss(zt, z0)}')
+
+        z0 = z0.permute(0, 2, 1).view(b, 4, 32, 32).contiguous()
+        z0 = self.autoencoder.decode(z0)
+        decoded_input = z0.clamp(0, 1).squeeze(0)
+
+        zt = zt.permute(0, 2, 1).view(b, 4, 32, 32).contiguous()
+        zt = self.autoencoder.decode(zt)
+
+        decoded_img = zt.clamp(0, 1).squeeze(0)
+
+        import matplotlib.pyplot as plt
+        fig, axs = plt.subplots(1, 2, figsize=(10, 5))
+        axs[0].imshow(decoded_input.cpu().numpy().transpose(1, 2, 0))
+        axs[1].imshow(decoded_img.cpu().numpy().transpose(1, 2, 0))
+        plt.savefig('decoded_img.png', dpi=300)
+        plt.close("all")
         return decoded_img
 
 def test_flux_lightning():
