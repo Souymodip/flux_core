@@ -62,7 +62,7 @@ def sample_timesteps(batch_size, device, eps=1e-4) -> Tensor:
 
 
 @torch.no_grad()
-def euler_step(model: nn.Module, y: Tensor, z1: Tensor, z0: Tensor,
+def euler_step(model: nn.Module, y: Tensor, z1: Tensor, z0: Tensor|None,
                   x_ids: Tensor, y_ids: Tensor,
                   steps: int=24):
     b, l, d = y.shape
@@ -93,7 +93,11 @@ def euler_step(model: nn.Module, y: Tensor, z1: Tensor, z0: Tensor,
         t = t.reshape(b, 1, 1)
 
         zt = zt + (t_next - t) * v_theta
-    
+    if len(losses) > 0:
+        # combine timesteps and losses into a nx2 tensor
+        losses = torch.tensor(losses)
+        losses = torch.stack([timesteps.cpu(), losses], dim=1)
+        losses = losses.cpu().numpy()
     return zt, losses
 
 
