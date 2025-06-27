@@ -96,7 +96,7 @@ def euler_step(model: nn.Module, y: Tensor, z1: Tensor, z0: Tensor|None,
     if len(losses) > 0:
         # combine timesteps and losses into a nx2 tensor
         losses = torch.tensor(losses)
-        losses = torch.stack([timesteps.cpu(), losses], dim=1)
+        losses = torch.stack([timesteps.cpu().squeeze(-1)[:-1], losses], dim=1)
         losses = losses.cpu().numpy()
     return zt, losses
 
