@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
+from typing import List
 
 try:
     from layers import (
@@ -146,7 +147,7 @@ class Flux(nn.Module):
         img = torch.cat((txt, img), 1)
         # import pdb; pdb.set_trace()
 
-        short_attn_freq = len(self.params.single_blocks) + 1 if self.params.long_short_attn_freq == 0 else int(1/self.params.long_short_attn_freq)
+        short_attn_freq = len(self.single_blocks) + 1 if self.params.long_short_attn_freq == 0 else int(1/self.params.long_short_attn_freq)
         for k, block in enumerate(self.single_blocks):
             img = block(img, vec=vec, pe=pe, attn_mask=attn_mask if k % short_attn_freq == 0 else None)
 
