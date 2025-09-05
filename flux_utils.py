@@ -1,5 +1,5 @@
 import math
-from typing import Callable
+from typing import Callable, List
 from einops import repeat
 import torch.nn as nn
 import torch.nn.functional as F
@@ -62,8 +62,8 @@ def sample_timesteps(batch_size, device, eps=1e-4) -> Tensor:
 
 
 @torch.no_grad()
-def euler_step(model: nn.Module, y: Tensor, z1: Tensor, z0: Tensor|None,
-                  x_ids: Tensor, y_ids: Tensor,
+def euler_step(model: nn.Module, y: List[Tensor], z1: Tensor, z0: Tensor|None,
+                  x_ids: Tensor, y_ids: List[Tensor],
                   steps: int=24):
     b, l, d = y.shape
 

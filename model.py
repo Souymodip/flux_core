@@ -39,6 +39,7 @@ class FluxParams:
     qkv_bias: bool
     guidance_embed: bool
     long_short_attn_freq: float # defines the frequency of the short attention blocks. (1/long_short_attn_freq) gives the time interval between long attention blocks. 0 means no short attention blocks.
+    num_conds: int
 
 
 class Flux(nn.Module):
@@ -51,7 +52,7 @@ class Flux(nn.Module):
 
         self.params = params
         assert self.params.long_short_attn_freq <= 1, "long_short_attn_freq must be <= 1"
-        
+        self.in_channels = params.in_channels
         self.out_channels = params.out_channels
         if params.hidden_size % params.num_heads != 0:
             raise ValueError(
@@ -69,7 +70,9 @@ class Flux(nn.Module):
         self.guidance_in = (
             MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size) if params.guidance_embed else nn.Identity()
         )
-        self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size)
+        # self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size)
+        # using multiple txt_ins for multiple conditions. Todo: check if this is overkill.
+        self.txt_ins = [nn.Linear(params.context_in_dim, self.hidden_size) for _ in range(params.num_conds)]
 
         self.double_blocks = nn.ModuleList(
             [
@@ -117,8 +120,8 @@ class Flux(nn.Module):
         self,
         img: Tensor,
         img_ids: Tensor,
-        txt: Tensor,  # txt is condition(which is orignal svg as image)
-        txt_ids: Tensor,
+        txt: List[Tensor],  # txt is condition(which is orignal svg as image)
+        txt_ids: List[Tensor],
         timesteps: Tensor,
         latent_dim: tuple[int, int, int],
         y: Tensor,
@@ -136,7 +139,13 @@ class Flux(nn.Module):
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
         if y is not None:
             vec = vec + self.vector_in(y)
-        txt = self.txt_in(txt)
+
+        txts = [self.txt_in(txt[i]) for i, self.txt_in in enumerate(self.txt_ins)]
+        txt = torch.cat(txts, dim=1)
+        txt_ids = torch.cat(txt_ids, dim=1)
+
+        assert txt.shape[1] == txt_ids.shape[1], f"txt and txt_ids must have the same number of tokens, got txt:{txt.shape} and txt_ids:{txt_ids.shape}"
+
         attn_mask = self.build_attn_mask(txt, img, latent_dim)
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
