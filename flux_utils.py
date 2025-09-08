@@ -65,7 +65,7 @@ def sample_timesteps(batch_size, device, eps=1e-4) -> Tensor:
 def euler_step(model: nn.Module, y: List[Tensor], z1: Tensor, z0: Tensor|None,
                   x_ids: Tensor, y_ids: List[Tensor],
                   steps: int=24):
-    b, l, d = y.shape
+    b, l, d = y[0].shape
 
     timesteps = torch.tensor(get_flux_schedule(
         num_steps=steps, 
