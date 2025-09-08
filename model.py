@@ -72,7 +72,9 @@ class Flux(nn.Module):
         )
         # self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size)
         # using multiple txt_ins for multiple conditions. Todo: check if this is overkill.
-        self.txt_ins = [nn.Linear(params.context_in_dim, self.hidden_size) for _ in range(params.num_conds)]
+        assert params.num_conds == 2
+        self.txt_in1 = nn.Linear(params.context_in_dim, self.hidden_size)
+        self.txt_in2 = nn.Linear(params.context_in_dim, self.hidden_size)
 
         self.double_blocks = nn.ModuleList(
             [
@@ -120,15 +122,17 @@ class Flux(nn.Module):
         self,
         img: Tensor,
         img_ids: Tensor,
-        txt: List[Tensor],  # txt is condition(which is orignal svg as image)
-        txt_ids: List[Tensor],
+        txts: List[Tensor],  # txt is condition(which is orignal svg as image)
+        txts_ids: List[Tensor],
         timesteps: Tensor,
-        latent_dim: tuple[int, int, int],
+        latent_dim: tuple[int, int, int], 
         y: Tensor,
         guidance: Tensor | None = None,
     ) -> Tensor:
-        if img.ndim != 3 or txt.ndim != 3:
+        if img.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
+        for txt in txts:
+            if txt.ndim != 3: raise ValueError("Input txt tensors must have 3 dimensions.")
 
         # running on sequences img
         img = self.img_in(img)
@@ -140,9 +144,9 @@ class Flux(nn.Module):
         if y is not None:
             vec = vec + self.vector_in(y)
 
-        txts = [self.txt_in(txt[i]) for i, self.txt_in in enumerate(self.txt_ins)]
+        txts = [self.txt_in1(txts[0]), self.txt_in2(txts[1])]
         txt = torch.cat(txts, dim=1)
-        txt_ids = torch.cat(txt_ids, dim=1)
+        txt_ids = torch.cat(txts_ids, dim=1)
 
         assert txt.shape[1] == txt_ids.shape[1], f"txt and txt_ids must have the same number of tokens, got txt:{txt.shape} and txt_ids:{txt_ids.shape}"
 
