@@ -1,12 +1,29 @@
 import torch
 from einops import rearrange
 from torch import Tensor
+from torch.nn.attention import flex_attention
+
+def win(score, b, h, q_idx, k_idx):
+    # allow |k - q| <= w (and k <= q if you want causal)
+    # keep = (k_idx - q_idx).remainder(64) == 0 or (q_idx < 256) or (k_idx < 256)  # safer than %
+    # return torch.where(keep, score, float('-inf'))
+    cond1 = (k_idx - q_idx).remainder(64) == 0
+    cond2 = q_idx < 256
+    cond3 = k_idx < 256
+    
+    keep = cond1 | cond2 | cond3
+    return torch.where(keep, score, float('-inf'))
+# causal variant:
+# return torch.where((k_idx <= q_idx) & ((q_idx - k_idx) <= w), score, float('-inf'))
 
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor, attn_mask: Tensor | None = None) -> Tensor:
     q, k = apply_rope(q, k, pe)
 
-    x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+    if attn_mask:
+        x = flex_attention.flex_attention(q, k, v, score_mod=win)
+    else:
+        x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
     x = rearrange(x, "B H L D -> B L (H D)")
 
     return x
