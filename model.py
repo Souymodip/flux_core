@@ -155,7 +155,7 @@ class Flux(nn.Module):
         short_attn_freq = len(self.single_blocks) + 1 if self.params.long_short_attn_freq == 0 else int(1/self.params.long_short_attn_freq)
 
         for k, block in enumerate(self.single_blocks):
-            img = block(img, vec=vec, pe=pe, attn_mask=k % short_attn_freq == 0)
+            img = block(img, vec=vec, pe=pe, attn_mask=(k > 3) and (k% short_attn_freq == 0))
 
         img = img[:, txt.shape[1] :, ...]
 
