@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
+from typing import List
 
 try:
     from layers import (
@@ -37,6 +38,7 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
+    long_short_attn_freq: float # defines the frequency of the short attention blocks. (1/long_short_attn_freq) gives the time interval between long attention blocks. 0 means no short attention blocks.
 
 
 class Flux(nn.Module):
@@ -48,7 +50,8 @@ class Flux(nn.Module):
         super().__init__()
 
         self.params = params
-        self.in_channels = params.in_channels
+        assert self.params.long_short_attn_freq <= 1, "long_short_attn_freq must be <= 1"
+        
         self.out_channels = params.out_channels
         if params.hidden_size % params.num_heads != 0:
             raise ValueError(
@@ -60,7 +63,7 @@ class Flux(nn.Module):
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
         self.pe_embedder = EmbedND(dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
-        self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
+        self.img_in = nn.Linear(self.params.in_channels, self.hidden_size, bias=True)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
         self.vector_in = MLPEmbedder(params.vec_in_dim, self.hidden_size)
         self.guidance_in = (
@@ -89,13 +92,35 @@ class Flux(nn.Module):
 
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
+    @torch.no_grad()
+    def build_attn_mask(self, txt: Tensor, img: Tensor, latent_dim: tuple[int, int, int]) -> Tensor:
+        num_cond_tokens = txt.shape[1]
+        num_img_tokens = img.shape[1]
+        num_tokens_per_layer = num_img_tokens // latent_dim[0]
+
+        # build grouped attention mask for concatenated [txt | img] tokens
+        total_tokens = num_cond_tokens + num_img_tokens
+        allowed = torch.zeros((total_tokens, total_tokens), dtype=torch.bool, device=img.device)
+        # cond queries attend everywhere; everyone attends to cond keys
+        allowed[:num_cond_tokens, :] = True
+        allowed[:, :num_cond_tokens] = True
+        # grouped attention among image tokens
+        for group_start in range(0, num_img_tokens, num_tokens_per_layer):
+            group_end = min(group_start + num_tokens_per_layer, num_img_tokens)
+            q_start = num_cond_tokens + group_start
+            q_end = num_cond_tokens + group_end
+            allowed[q_start:q_end, q_start:q_end] = True
+        # attn_mask = ~allowed  # boolean mask: True values are masked
+        return allowed
+
     def forward(
         self,
         img: Tensor,
         img_ids: Tensor,
-        txt: Tensor,
+        txt: Tensor,  # txt is condition(which is orignal svg as image)
         txt_ids: Tensor,
         timesteps: Tensor,
+        latent_dim: tuple[int, int, int],
         y: Tensor,
         guidance: Tensor | None = None,
     ) -> Tensor:
@@ -111,17 +136,27 @@ class Flux(nn.Module):
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256))
         if y is not None:
             vec = vec + self.vector_in(y)
+
         txt = self.txt_in(txt)
+
+        assert txt.shape[1] == txt_ids.shape[1], f"txt and txt_ids must have the same number of tokens, got txt:{txt.shape} and txt_ids:{txt_ids.shape}"
+
+        # attn_mask = self.build_attn_mask(txt, img, latent_dim)
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
-
         for block in self.double_blocks:
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
         img = torch.cat((txt, img), 1)
-        for block in self.single_blocks:
-            img = block(img, vec=vec, pe=pe)
+
+        assert img_ids.shape[1] / latent_dim[0] == 64, "Windowed attention will not work"
+
+        short_attn_freq = len(self.single_blocks) + 1 if self.params.long_short_attn_freq == 0 else int(1/self.params.long_short_attn_freq)
+
+        for k, block in enumerate(self.single_blocks):
+            img = block(img, vec=vec, pe=pe, attn_mask=((k+1) % short_attn_freq == 0))
+
         img = img[:, txt.shape[1] :, ...]
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
@@ -143,6 +178,7 @@ def test_model():
         theta=10_000,
         qkv_bias=True,
         guidance_embed=False,
+        long_short_attn_freq=0.5,
     )
 
     data = torch.randn(2, 1024, 2)

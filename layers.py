@@ -227,7 +227,7 @@ class SingleStreamBlock(nn.Module):
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(hidden_size, double=False)
 
-    def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+    def forward(self, x: Tensor, vec: Tensor, pe: Tensor, attn_mask: Tensor | None = None) -> Tensor:
         mod, _ = self.modulation(vec)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
         qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
@@ -236,7 +236,7 @@ class SingleStreamBlock(nn.Module):
         q, k = self.norm(q, k, v)
 
         # compute attention
-        attn = attention(q, k, v, pe=pe)
+        attn = attention(q, k, v, pe=pe, attn_mask=attn_mask)
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return x + mod.gate * output
